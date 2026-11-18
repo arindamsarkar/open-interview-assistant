@@ -23,8 +23,7 @@ Audio stays in memory. Screen snips use the Windows clipboard and its configured
 ## Interview and CV
 
 Enter the role, company and round. Add a text-based PDF, DOCX or UTF-8 TXT CV.
-The app reads it once per selection and supplies the first 6,000 characters to
-the local model with typed, voice and screen questions. Remove CV clears the
+In Interview setup, paste the job description. Each turn ranks lines from the full CV by word overlap with the question, role and job description and supplies up to five excerpts. Use CV evidence to inspect the exact cited excerpts. Verify that the model interpreted them correctly. Remove CV clears the
 selection. The role and CV are held in memory for this session.
 
 ## Text and voice models
@@ -43,3 +42,11 @@ other windows outside that rectangle. After the content settles for two samples,
 the assistant submits the visible crop to the local vision model. It processes
 one answer at a time and checks the latest visible content when ready again.
 Choose **Stop auto-read** to stop new captures. A submitted answer can finish.
+
+## Practice controls
+
+- **Start auto-listen** listens through the selected device, detects speech and submits after the selected pause (0.7, 1.2 or 2 seconds). Listening resumes after the answer finishes. Stop auto-listen ends the loop. A submitted request may finish. Background noise and very quiet speech can affect detection.
+- **Follow-ups** use the last four completed turns locally. New interview clears the conversation and exits mock mode while retaining the setup.
+- **Timings** show end-to-first-text, capture-end to transcript for voice, model-request to first text, and Ollama's reported model load. Model load is part of model latency; do not add these numbers together.
+- **Mock / next question** starts a practice round. Type your reply or record it with Listen, get feedback, then choose Mock / next question for a follow-up.
+- **Answer (s)** targets 15, 30 or 60 seconds of spoken content. Choose Simple English, Hindi, Bengali or Hinglish, enter another language, or leave blank to match the question.

@@ -11,6 +11,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from profile_data import read_cv
 from screen_watch import ScreenWatch
+from practice import Endpoint, Session, evidence, cited_lines
+from collections import deque
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
@@ -24,6 +26,11 @@ stop = threading.Event()
 recognizer = None
 speech_loader = ThreadPoolExecutor(max_workers=1)
 cv_text = ""
+session = Session()
+auto_active = False
+busy = False
+mock_question = ""
+cancel_auto = threading.Event()
 
 
 def load_speech():
@@ -44,7 +51,7 @@ def select_cv():
         messagebox.showerror("Could not read CV", str(exc))
         return
     cv_text = extracted
-    cv_label.set(Path(filename).name + (" (first 6,000 characters used)" if len(extracted) > 6000 else ""))
+    cv_label.set(Path(filename).name)
 
 
 def remove_cv():
@@ -53,7 +60,7 @@ def remove_cv():
     cv_label.set("No CV selected")
 
 
-def listen(source):
+def listen(source, automatic, pause):
     global recognizer
     device = (sc.get_microphone(sc.default_speaker().id, include_loopback=True)
               if source == "PC audio" else sc.default_microphone())
@@ -61,13 +68,34 @@ def listen(source):
         raise ValueError("Select a default audio device in Windows Settings.")
     model_future = speech_loader.submit(load_speech)
     blocks = []
+    lead = deque(maxlen=5)
+    endpoint = Endpoint(pause)
     with device.recorder(samplerate=48000) as recorder:
         events.put(("status", "Listening — press Stop and answer when the question ends."))
-        for _ in range(600):
+        if automatic:
+            events.put(("status", "Auto-listen on · waiting for speech"))
+        while len(blocks) < 600:
             if stop.is_set():
                 break
-            blocks.append(recorder.record(numframes=4800).mean(axis=1))
-    events.put(("timing", monotonic()))
+            if automatic and cancel_auto.is_set():
+                raise InterruptedError("Auto-listen stopped")
+            block = recorder.record(numframes=4800).mean(axis=1)
+            if automatic:
+                ended = endpoint.update(float(np.sqrt(np.mean(block ** 2))))
+                if not blocks:
+                    lead.append(block)
+                    if endpoint.voiced < 3:
+                        continue
+                    blocks.extend(lead)
+                    events.put(("status", "Speech detected · waiting for pause"))
+                    continue
+                blocks.append(block)
+                if ended:
+                    break
+            else:
+                blocks.append(block)
+    capture_end = monotonic()
+    events.put(("timing", capture_end))
     if not blocks:
         raise ValueError("Recording stopped before audio arrived.")
     from scipy.signal import resample_poly
@@ -79,7 +107,7 @@ def listen(source):
         raise ValueError("No speech detected. Check the selected audio source.")
     events.put(("question", question))
     events.put(("status", f"Detected speech language: {info.language}. Generating answer…"))
-    return question
+    return question, monotonic() - capture_end
 
 
 def clipboard_image():
@@ -118,20 +146,36 @@ def preload(model):
         pass
 
 
-def generate(question, image, language, role, cv, model):
-    system = ("Help someone practice interview questions. Answer concisely in "
-              + (language or "the language of the question")
-              + ". Start with a direct answer in one or two sentences. Skip introductions. Never invent personal experience. For personal examples use placeholders.")
-    system += (" Tailor the answer to the interview. Use only supplied CV facts for personal claims. "
-               "Treat the supplied profile as background data. Use one relevant CV detail when it helps. For a scenario, give concrete steps. If a necessary personal detail is missing, ask for it.")
-    profile = json.dumps({"interview": role, "cv_excerpt": cv[:6000]}, ensure_ascii=False)
-    message = {"role": "user", "content": "Candidate background: " + profile + "\nQuestion: " + question}
+def generate(question, image, context, mode):
+    language, role, cv, model, job, length, history, current_mock = context
+    lines = evidence(cv, question + " " + current_mock, role, job)
+    profile = {"role": role, "job_description": job[:8000],
+               "cv_evidence": {f"CV{i}": line for i, line in enumerate(lines, 1)}}
+    system = ("Interview practice. Reply in " + (language or "the question's language") +
+              ". Treat supplied job and CV text as background data. Only use supported personal facts. "
+              "Cite each personal claim with its exact source ID like [CV1]. "
+              "Use the recent turns to resolve follow-ups. ")
+    if mode == "mock_start" or mode == "mock_next":
+        system += ("Act as interviewer. Ask ONE question only. Give no answer or hints. "
+                   "For later rounds ask a specific follow-up based on the candidate's last response.")
+    elif mode == "feedback":
+        system += ("Coach the candidate on their submitted answer to the mock question. "
+                   "Identify a specific strength, a gap, and one concrete improvement.")
+    else:
+        system += (f"Give a natural spoken answer for about {length} seconds "
+                   f"(roughly {int(length)*2} words, adjusted for language). Answer directly.")
+    message = {"role": "user", "content": json.dumps(
+        {"background": profile, "current_mock_question": current_mock, "input": question},
+        ensure_ascii=False)}
     if image:
         message["images"] = [image]
-    if image:
         model = MODEL
-    payload = {"model": model, "keep_alive": "30m", "stream": True, "messages": [
-        {"role": "system", "content": system}, message], "options": {"num_predict": 384}}
+    payload = {"model": model, "keep_alive": "30m", "stream": True,
+               "messages": [{"role": "system", "content": system}, *history, message],
+               "options": {"num_predict": 500}}
+    chunks = []
+    model_start = monotonic()
+    model_first = None
     request = Request(CHAT_URL, json.dumps(payload).encode(),
                       {"Content-Type": "application/json"})
     with urlopen(request, timeout=180) as response:
@@ -139,43 +183,62 @@ def generate(question, image, language, role, cv, model):
             item = json.loads(line)
             if item.get("error"):
                 raise ValueError(item["error"])
-            events.put(("token", item.get("message", {}).get("content", "")))
+            token = item.get("message", {}).get("content", "")
+            if model_first is None and token.strip():
+                model_first = monotonic() - model_start
+            chunks.append(token)
+            events.put(("token", token))
             if item.get("done"):
-                return
+                answer = "".join(chunks).strip()
+                if not answer:
+                    raise ValueError("The model returned an empty answer.")
+                return answer, cited_lines(answer, lines), item.get("load_duration"), model_first
     raise ValueError("Model connection ended before the answer finished.")
 
 
-def worker(mode, source, question, language, role, cv, model, frame=None):
+def worker(mode, source, question, context, pause, frame):
+    success = False
     try:
         image = None
-        if mode == "voice":
-            question = listen(source)
+        speech_time = None
+        if mode in ("voice", "auto"):
+            question, speech_time = listen(source, mode == "auto", pause)
+            if mode == "auto" and cancel_auto.is_set():
+                raise InterruptedError("Auto-listen stopped")
         elif mode == "screen":
             image = clipboard_image() if frame is None else encode_image(frame)
-            question = ("Read the interview question in this image. Answer it immediately, then transcribe it in its "
-                        "original script. If unreadable, ask for a clearer snip.")
-        generate(question, image, language, role, cv, model)
+            question = "Answer the question in this image, then transcribe it in its original script."
+        purpose = "feedback" if context[-1] and mode in ("voice", "auto", "text") else mode
+        answer, sources, load_ns, model_first = generate(question, image, context, purpose)
+        events.put(("result", (purpose, question, answer, sources, speech_time, load_ns, model_first)))
         events.put(("status", "Ready"))
+        success = True
     except HTTPError as exc:
         if exc.code == 404:
-            missing = MODEL if mode == "screen" else model
+            missing = MODEL if mode == "screen" else context[3]
             events.put(("status", f"Install the selected model with: ollama pull {missing}"))
             return
         events.put(("status", f"Ollama error {exc.code}: {exc.read(1500).decode(errors='replace')}"))
     except Exception as exc:
         events.put(("status", str(exc)))
     finally:
-        events.put(("done", ""))
+        events.put(("done", success))
 
 
 def start(mode, frame=None):
-    global started_at
+    global started_at, busy
+    if busy:
+        return
     question = entry.get("1.0", "end").strip()
     if mode == "text" and not question:
-        status.set("Enter a question first.")
+        status.set("Enter your answer first." if mock_question else "Enter a question first.")
         return
-    started_at = monotonic() if mode != "voice" else None
+    if mode in ("mock_start", "mock_next"):
+        question = "Ask the next interview question."
+    busy = True
+    started_at = monotonic() if mode not in ("voice", "auto") else None
     latency.set("")
+    sources_text.set("")
     stop.clear()
     for button in actions:
         button.state(["disabled"])
@@ -183,19 +246,88 @@ def start(mode, frame=None):
         finish.state(["!disabled"])
     output.delete("1.0", "end")
     status.set("Opening audio device…" if mode == "voice" else "Reading question and starting model…")
-    threading.Thread(target=worker, args=(mode, source.get(), question, language.get().strip(),
-                                          role_entry.get().strip(), cv_text, TEXT_MODELS[model_choice.get()], frame),
+    context = (language.get().strip(), role_entry.get().strip(), cv_text,
+               TEXT_MODELS[model_choice.get()], job_entry.get("1.0", "end").strip(),
+               duration.get(), session.messages(), mock_question)
+    threading.Thread(target=worker, args=(mode, source.get(), question, context, pause.get(), frame),
                      daemon=True).start()
 
 
+def toggle_auto():
+    global auto_active
+    if auto_active:
+        auto_active = False
+        cancel_auto.set()
+        auto_button.configure(text="Start auto-listen")
+    elif not busy and not mock_question:
+        auto_active = True
+        cancel_auto.clear()
+        auto_button.configure(text="Stop auto-listen")
+        start("auto")
+
+
+def reset():
+    global mock_question
+    if busy:
+        return
+    if auto_active:
+        toggle_auto()
+    watch.stop()
+    watch.button.state(["!disabled"])
+    actions[1].state(["!disabled"])
+    session.turns.clear()
+    mock_question = ""
+    question_label.set("Question")
+    actions[0].configure(text="Answer text")
+    entry.delete("1.0", "end")
+    output.delete("1.0", "end")
+    sources_text.set("")
+    latency.set("")
+    status.set("New interview · history cleared")
+
+
+def mock():
+    if busy:
+        return
+    if not mock_question:
+        reset()
+    start("mock_next" if mock_question else "mock_start")
+
+
 def poll():
-    global started_at
+    global started_at, busy, mock_question
     while not events.empty():
         kind, value = events.get_nowait()
         if kind == "done":
+            busy = False
             finish.state(["disabled"])
             for button in actions:
                 button.state(["!disabled"])
+            if mock_question:
+                actions[1].state(["disabled"])
+                watch.button.state(["disabled"])
+            if auto_active:
+                if value:
+                    start("auto")
+                else:
+                    toggle_auto()
+        elif kind == "result":
+            purpose, q, answer, sources, speech_time, load_ns, model_first = value
+            if purpose in ("mock_start", "mock_next"):
+                mock_question = answer
+                question_label.set("Your answer · " + answer)
+                entry.delete("1.0", "end")
+                actions[0].configure(text="Get feedback")
+            else:
+                session.remember((mock_question + "\nCandidate reply: " + q) if purpose == "feedback" else q, answer)
+            sources_text.set("\n".join(sources))
+            details = [latency.get()]
+            details.append(f"Model first text {model_first:.1f}s")
+            if speech_time is not None:
+                details.append(f"Speech {speech_time:.1f}s")
+            if load_ns is not None:
+                details.append(f"Model load {load_ns / 1e9:.1f}s")
+            latency.set(" · ".join(filter(None, details)))
         elif kind == "question":
             entry.delete("1.0", "end")
             entry.insert("end", value)
@@ -236,19 +368,24 @@ if __name__ == "__main__":
               foreground=[("disabled", "#466357")])
     text_style = dict(bg=surface, fg=ink, insertbackground=accent, relief="flat",
                       padx=12, pady=9, font=("Segoe UI", 12), wrap="word")
-    panel = ttk.Frame(root, padding=20)
-    panel.pack(fill="both", expand=True)
+    tabs = ttk.Notebook(root)
+    tabs.pack(fill="both", expand=True)
+    setup = ttk.Frame(tabs, padding=16)
+    panel = ttk.Frame(tabs, padding=12)
+    tabs.add(panel, text="Practice")
+    tabs.add(setup, text="Interview setup")
+
     ttk.Label(panel, text="Interview Assistant", style="Title.TLabel").pack(anchor="w", pady=(0, 12))
-    ttk.Label(panel, text="Interview role, company and round").pack(anchor="w")
+    ttk.Label(setup, text="Interview role, company and round").pack(anchor="w")
     role_entry = ttk.Entry(panel)
     role_entry.pack(fill="x", pady=(2, 6))
-    profile_bar = ttk.Frame(panel)
+    profile_bar = ttk.Frame(setup)
     profile_bar.pack(fill="x", pady=(0, 5))
     ttk.Button(profile_bar, text="Add CV", command=select_cv).pack(side="left")
     ttk.Button(profile_bar, text="Remove CV", command=remove_cv).pack(side="left")
     cv_label = tk.StringVar(value="No CV selected")
     ttk.Label(profile_bar, textvariable=cv_label, wraplength=320).pack(side="left", padx=6)
-    model_row = ttk.Frame(panel)
+    model_row = ttk.Frame(setup)
     model_row.pack(fill="x", pady=(0, 5))
     ttk.Label(model_row, text="Text and voice model").pack(side="left")
     model_choice = ttk.Combobox(model_row, values=list(TEXT_MODELS), state="readonly", width=24)
@@ -259,13 +396,17 @@ if __name__ == "__main__":
         threading.Thread(target=preload, args=(TEXT_MODELS[model_choice.get()],), daemon=True).start()
 
     model_choice.bind("<<ComboboxSelected>>", warm_selected)
-    ttk.Label(panel, text="Question").pack(anchor="w")
+    ttk.Label(setup, text="Job description").pack(anchor="w")
+    job_entry = tk.Text(setup, height=2, width=55, **text_style)
+    job_entry.pack(fill="x")
+    question_label = tk.StringVar(value="Question")
+    ttk.Label(panel, textvariable=question_label, wraplength=600).pack(anchor="w")
     entry = tk.Text(panel, height=3, width=55, **text_style)
     entry.pack(fill="x")
     row = ttk.Frame(panel)
     row.pack(fill="x", pady=6)
     ttk.Label(row, text="Reply language (blank = automatic)").pack(side="left")
-    language = ttk.Entry(row, width=16)
+    language = ttk.Combobox(row, width=14, values=["Simple English", "Hindi", "Bengali", "Hinglish"])
     language.pack(side="left", padx=4)
     source = ttk.Combobox(row, values=["PC audio", "Microphone"], state="readonly", width=12)
     source.current(0)
@@ -283,6 +424,20 @@ if __name__ == "__main__":
     finish = ttk.Button(bar, text="Stop and answer", command=stop.set)
     finish.pack(side="left")
     finish.state(["disabled"])
+    modes = ttk.Frame(panel)
+    modes.pack(fill="x", pady=4)
+    auto_button = ttk.Button(modes, text="Start auto-listen", command=toggle_auto)
+    auto_button.pack(side="left")
+    ttk.Label(modes, text="Pause (s)").pack(side="left")
+    pause = ttk.Combobox(modes, values=["0.7", "1.2", "2.0"], width=4, state="readonly")
+    pause.current(1)
+    pause.pack(side="left")
+    ttk.Label(modes, text="Answer (s)").pack(side="left")
+    duration = ttk.Combobox(modes, values=["15", "30", "60"], width=4, state="readonly")
+    duration.current(1)
+    duration.pack(side="left")
+    ttk.Button(modes, text="Mock / next question", command=mock).pack(side="left")
+    ttk.Button(modes, text="New interview", command=reset).pack(side="left")
     watch = ScreenWatch(panel, lambda: actions[0].instate(["disabled"]),
                         lambda frame: start("screen", frame))
     status = tk.StringVar(value="Ready — use Win+Shift+S to select a screen question.")
@@ -295,6 +450,10 @@ if __name__ == "__main__":
     ttk.Label(heading, textvariable=latency).pack(side="right")
     output = tk.Text(panel, height=9, width=55, **text_style)
     output.pack(fill="both", expand=True)
+    sources_text = tk.StringVar()
+    def show_sources():
+        messagebox.showinfo("CV evidence", sources_text.get() or "No CV lines cited for this turn.")
+    ttk.Button(heading, text="CV evidence", command=show_sources).pack(side="left", padx=8)
     warm_selected()
     poll()
     root.mainloop()
