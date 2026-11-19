@@ -1,0 +1,29 @@
+name: Two-system extension trial
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/extension-trial.yml'
+      - 'chrome-extension/**'
+permissions:
+  contents: read
+jobs:
+  browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install playwright==1.56.0 pillow
+      - run: python -m playwright install chromium
+      - run: python tests/extension_trial.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-trial-${{ matrix.os }}
+          path: trial-images/
