@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Open Interview Assistant",
+  "version": "1.0.0",
+  "description": "Practice interview questions with a visible floating panel and a local Ollama model.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {"service_worker": "worker.js"},
+  "action": {"default_title": "Open Interview Assistant", "default_popup": "menu.html"}
+}

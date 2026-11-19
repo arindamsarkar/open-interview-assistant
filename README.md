@@ -50,3 +50,20 @@ Choose **Stop auto-read** to stop new captures. A submitted answer can finish.
 - **Timings** show end-to-first-text, capture-end to transcript for voice, model-request to first text, and Ollama's reported model load. Model load is part of model latency; do not add these numbers together.
 - **Mock / next question** starts a practice round. Type your reply or record it with Listen, get feedback, then choose Mock / next question for a follow-up.
 - **Answer (s)** targets 15, 30 or 60 seconds of spoken content. Choose Simple English, Hindi, Bengali or Hinglish, enter another language, or leave blank to match the question.
+
+## Chrome extension
+
+Extract the repository ZIP. In Chrome open `chrome://extensions`, enable Developer mode,
+click Load unpacked and select the `chrome-extension` folder containing manifest.json.
+Start Ollama with the selected model installed. Select a question on an ordinary webpage,
+click the extension icon and choose the on-page panel or a separate practice window.
+Enter the role, language and relevant CV notes under Interview setup. Both panels
+stream answers from localhost and keep four recent exchanges until closed.
+If Ollama returns 403, append the exact origin shown in the panel to your Windows
+user environment variable OLLAMA_ORIGINS, fully quit Ollama and reopen it.
+
+The on-page panel appears in a shared tab. The separate window is an ordinary
+window; share only the intended tab and verify the meeting preview. Whole-screen
+sharing may include the assistant. The Chrome companion supports typed and
+selected-text questions. Audio, visual screen watching, CV file import and mock
+interviews are in the Windows app.
