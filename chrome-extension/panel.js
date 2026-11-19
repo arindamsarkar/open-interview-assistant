@@ -22,7 +22,13 @@
     <div class="reply"><output id="answer" aria-label="Suggested answer"></output></div>
     <label for="question">Question</label><textarea id="question" rows="2" placeholder="Ask a question or follow up"></textarea>
     <div class="actions"><button id="pick">Use selection</button><button id="ask">Assist <kbd>Ctrl ↵</kbd></button></div>
-    <small id="status" role="status">Ready</small></div></section>`;
+    <details><summary>Meeting tools</summary>
+    <label>Speech language<select id="speechLang"><option value="en-IN">English</option><option value="hi-IN">Hindi</option><option value="bn-IN">Bengali</option></select></label>
+    <small>Chrome may send microphone audio to its speech service. Start only with participant permission.</small>
+    <div class="actions"><button id="mic">Start mic transcript</button><button id="screen">Ask about screen</button></div>
+    <label>Transcript and meeting notes<textarea id="notes" rows="4"></textarea></label>
+    <div class="actions"><button id="summary">Recap and next steps</button><button id="export">Export Markdown</button></div>
+    </details><small id="status" role="status">Ready</small></div></section>`;
   const el = id => ui.getElementById(id);
   el("fold").onclick = () => {
     const folded = !el("body").hidden;
@@ -66,9 +72,66 @@
   };
   const history = [];
   let port;
-  el("close").onclick = () => {port?.disconnect(); host.remove(); if (standalone) window.close();};
-  el("ask").onclick = () => {
-    const question = el("question").value.trim();
+  const log = [];
+  let recognition;
+  let capturing = false;
+  let closed = false;
+  el("mic").onclick = () => {
+    if (recognition) {recognition.stop(); return;}
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Speech) {el("status").textContent = "Speech recognition unavailable. Type or paste your transcript."; return;}
+    const speech = new Speech();
+    speech.lang = el("speechLang").value;
+    speech.continuous = true;
+    speech.onresult = event => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          const line = event.results[i][0].transcript.trim();
+          if (line) el("notes").value += (el("notes").value ? "\n" : "") + line;
+        }
+      }
+    };
+    speech.onend = () => {recognition = null; el("mic").textContent = "Start mic transcript";};
+    speech.onerror = e => {el("status").textContent = "Microphone transcription: " + e.error;};
+    try {
+      speech.start(); recognition = speech; el("mic").textContent = "Stop mic transcript";
+    } catch (error) {el("status").textContent = error.message;}
+  };
+  el("screen").onclick = async () => {
+    if (capturing || port) return;
+    capturing = true;
+    let stream;
+    const video = document.createElement("video");
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({video:true, audio:false});
+      if (closed) return;
+      video.muted = true; video.srcObject = stream; await video.play();
+      const canvas = document.createElement("canvas");
+      const ratio = Math.min(1, 1600 / video.videoWidth);
+      canvas.width = Math.round(video.videoWidth * ratio);
+      canvas.height = Math.round(video.videoHeight * ratio);
+      canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (!closed) run(el("question").value.trim() || "Read and answer the question on screen.", "screen", canvas.toDataURL("image/png").split(",")[1]);
+    } catch (error) {el("status").textContent = "Screen capture: " + error.message;}
+    finally {stream?.getTracks().forEach(track => track.stop()); video.srcObject = null; capturing = false;}
+  };
+  el("export").onclick = () => {
+    const parts = ["# Interview session", el("role").value, "## Meeting notes", el("notes").value,
+                   ...log.map(turn => "## " + turn.question + "\n\n" + turn.answer)];
+    const url = URL.createObjectURL(new Blob([parts.join("\n\n")], {type:"text/markdown"}));
+    const link = document.createElement("a"); link.href = url; link.download = "interview-session.md"; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+  el("close").onclick = () => {
+    closed = true; recognition?.abort(); port?.disconnect(); host.remove(); if (standalone) window.close();
+  };
+  el("ask").onclick = () => run(el("question").value.trim(), "answer");
+  el("summary").onclick = () => {
+    if (!el("notes").value.trim() && !history.length) {el("status").textContent = "Add notes or complete a turn first.";return;}
+    run("Summarize this discussion and list decisions and next steps. Include owners and dates only if stated.", "recap");
+  };
+  function run(question, mode, image) {
+    if (port || closed) return;
     if (!question) {el("status").textContent = "Enter or select a question.";return;}
     const channel = chrome.runtime.connect({name:"practice"});
     port = channel; el("ask").disabled = true;
@@ -81,12 +144,13 @@
       if (msg.token) {el("answer").textContent += msg.token; el("status").textContent="Answering…";}
       if (msg.done || msg.error) {
         if (msg.done) {
+          log.push({question,answer:el("answer").textContent});
           history.push({role:"user",content:question},{role:"assistant",content:el("answer").textContent});
           if (history.length > 8) history.splice(0,2);
         }
         el("status").textContent = msg.error || "Ready"; port=null; el("ask").disabled=false; channel.disconnect();
       }
     });
-    channel.postMessage({question,history,role:el("role").value,cv:el("cv").value.slice(0,6000),language:el("language").value,model:el("model").value});
+    channel.postMessage({question,history,mode,image,notes:el("notes").value.slice(-16000),role:el("role").value,cv:el("cv").value.slice(0,6000),language:el("language").value,model:el("model").value});
   };
 })();

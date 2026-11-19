@@ -20,14 +20,14 @@ chrome.runtime.onConnect.addListener(port => {
       const res = await fetch("http://127.0.0.1:11434/api/chat", {
         method: "POST", signal: controller.signal, headers: {"Content-Type":"application/json"},
         body: JSON.stringify({
-          model: msg.model, stream: true, keep_alive: "15m",
-          messages: [{role:"system",content:"Coach interview practice. Answer briefly in the requested language. Ground personal claims in the provided background."},
-                     ...msg.history, {role:"user",content:JSON.stringify({role:msg.role,background:msg.cv,language:msg.language || "match the question",question:msg.question})}]
+          model: msg.image ? "gemma3:4b" : msg.model, stream: true, keep_alive: "15m",
+          messages: [{role:"system",content:msg.mode === "recap" ? "Write concise meeting notes in the requested language. Ground the summary in the supplied notes and discussion. Mark missing information clearly." : "Coach interview practice. Answer briefly in the requested language. Ground personal claims in the provided background."},
+                     ...msg.history, {role:"user",...(msg.image ? {images:[msg.image]} : {}),content:JSON.stringify({role:msg.role,background:msg.cv,meeting_notes:msg.notes,language:msg.language || "match the question",question:msg.question})}]
         })
       });
       if (!res.ok) {
         if (res.status === 403) throw Error("Allow this extension in Ollama. Set OLLAMA_ORIGINS to chrome-extension://" + chrome.runtime.id + " and restart Ollama.");
-        if (res.status === 404) throw Error("Model missing. Run ollama pull " + msg.model);
+        if (res.status === 404) throw Error("Model missing. Run ollama pull " + (msg.image ? "gemma3:4b" : msg.model));
         throw Error("Ollama returned HTTP " + res.status);
       }
       let buffer = "";

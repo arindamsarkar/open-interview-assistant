@@ -67,3 +67,15 @@ window; share only the intended tab and verify the meeting preview. Whole-screen
 sharing may include the assistant. The Chrome companion supports typed and
 selected-text questions. Audio, visual screen watching, CV file import and mock
 interviews are in the Windows app.
+
+### Chrome meeting tools (1.1)
+
+Meeting tools can collect microphone transcripts through Chrome's speech service
+where supported. Choose the spoken language before starting. Browser speech may
+send audio to a provider. Type or paste notes if speech is unavailable. Assist uses
+the latest 16,000 characters of notes plus the last four completed exchanges.
+Ask about screen opens the browser's source picker and sends a single frame to
+local Gemma 4B. The capture tracks stop after the snapshot. Recap and next steps
+summarizes the supplied context. Export Markdown downloads the full notes and
+completed responses before you close the panel. On-page and separate panels can
+appear in screen sharing. Audio from another tab is not directly transcribed.
